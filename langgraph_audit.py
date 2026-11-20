@@ -1,36 +1,51 @@
 ﻿"""
-OmniGuard — LangGraph Multi-Agent Compliance & Key-Risk Runner
-Adapts LangGraph StateGraph + MemorySaver + Pydantic structured routing
-over the in-process Relate graph store (`omniguard.rl`).
+OmniGuard — Natural-Language LangGraph Compliance & Key-Risk Runner
+Handles open-ended natural-language queries and follow-up turns over `omniguard.rl`
+using LangGraph StateGraph + MemorySaver + Pydantic structured models.
 
 Requires: pip install langgraph pydantic relate-db
-Optional (for LLM routing/rewriting): pip install langchain-openai + OPENAI_API_KEY
+Optional (for LLM intent parsing/synthesis): pip install langchain-openai + OPENAI_API_KEY
 """
 
 from pathlib import Path
-from typing import Any, Literal, TypedDict
 import os
-from pydantic import BaseModel, Field
+import re
+from typing import Any, Literal, TypedDict
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from pydantic import BaseModel, Field
 import relate
 
 DB_PATH = Path(__file__).resolve().parent / "omniguard.rl"
 
 
-class RouteDecision(BaseModel):
-    lenses: list[Literal["CDMC", "PCI_DSS", "NIST_800"]] = Field(
-        description="Specialist compliance/risk lenses to invoke for this query"
-    )
+class QueryPlan(BaseModel):
     standalone_query: str = Field(
-        description="Query resolved with prior conversation context if needed"
+        description="Natural-language query resolved with prior conversation context"
     )
-    reason: str = Field(description="Brief routing rationale")
+    lenses: list[Literal["CDMC", "PCI_DSS", "NIST_800"]] = Field(
+        description="Relevant compliance/risk lenses for the question"
+    )
+    log_type: Literal["access", "network", "application"] | None = Field(
+        default=None, description="Optional log category filter if the user asked about one"
+    )
+    only_risky_credentials: bool = Field(
+        default=False, description="True when user asks about exposed, leaked, or over-aged keys/credentials"
+    )
+    min_key_age_days: int | None = Field(
+        default=None, description="Optional minimum key age threshold mentioned by the user"
+    )
+    data_element_keyword: str | None = Field(
+        default=None, description="Optional data element focus such as CVV, PAN, KEY, or CATALOG"
+    )
+    reason: str = Field(description="Concise explanation of how the query was interpreted")
 
 
 class GraphCitation(BaseModel):
     usage_id: str
     log_type: str
+    protocol: str
+    action: str
     source_system: str
     collector: str
     credential_id: str
@@ -54,13 +69,73 @@ class SpecialistFinding(BaseModel):
 
 class AuditState(TypedDict):
     user_query: str
+    history: list[dict[str, str]]
     standalone_query: str
+    plan: dict[str, Any]
     active_lenses: list[str]
-    route_reason: str
     total_usage_events: int
     evidence_rows: list[dict[str, Any]]
     findings: list[dict[str, Any]]
     final_report: str
+
+
+ONTOLOGY_SPEC = """
+OmniGuard Graph Ontology (omniguard.rl):
+Nodes:
+  - :Agent (name, role, network_zone)
+  - :Usage (usage_id, log_type [application|network|access], action, protocol, outcome, redacted_payload)
+  - :LogSource (source_id, system_name, collector, log_category, zone)
+  - :Credential (cred_id, cred_type, key_age_days, max_age_days, status [active|exposed], allowed_targets)
+  - :DataElement (elem_id, name [CVV|PAN|PRIVATE_SIGNING_KEY|CATALOG_LINEAGE_METADATA], classification, is_sad)
+  - :Rule (rule_id, code, description)
+  - :Policy (policy_id, name)
+  - :Control (control_id, code, title)
+  - :Framework (framework_id, name [PCI DSS v4.0.1|CDMC|NIST SP 800-53|NIST SP 800-57|NIST SP 800-92])
+
+Relationships:
+  (:Agent)-[:EMITTED]->(:Usage)
+  (:LogSource)-[:COLLECTED]->(:Usage)
+  (:Credential)-[:AUTHENTICATED]->(:Usage)
+  (:Usage)-[:EXPOSES]->(:DataElement)
+  (:Rule)-[:PROTECTS]->(:DataElement)
+  (:Policy)-[:CONTAINS]->(:Rule)
+  (:Rule)-[:MAPS_TO]->(:Control)-[:BELONGS_TO]->(:Framework)
+"""
+
+
+def _synthesize_grounded_answer(
+    lens: str,
+    user_query: str,
+    citations: list[GraphCitation],
+    fallback_summary: str,
+) -> str:
+    """Uses LLM grounded strictly in retrieved graph citations when OPENAI_API_KEY is set."""
+    if not os.getenv("OPENAI_API_KEY") or not citations:
+        return fallback_summary
+    try:
+        from langchain_openai import ChatOpenAI
+
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        evidence_lines = [
+            f"- usage_id={c.usage_id}, log_type={c.log_type}, protocol={c.protocol}, action={c.action}, "
+            f"source={c.source_system}/{c.collector}, cred={c.credential_id} (status={c.credential_status}, "
+            f"age={c.key_age_days}/{c.max_age_days}d), element={c.data_element}, rule={c.rule_code}, "
+            f"control={c.control_code}, framework={c.framework}"
+            for c in citations
+        ]
+        prompt = (
+            f"You are the {lens} compliance specialist for OmniGuard.\n"
+            f"Answer the user's question concisely using ONLY the graph evidence below.\n"
+            f"Explicitly reference the relevant usage_id, credential_id, control_code, and framework.\n"
+            f"Do not assume or invent anything not present in the evidence.\n\n"
+            f"Question: {user_query}\n"
+            f"Graph Evidence:\n" + "\n".join(evidence_lines)
+        )
+        resp = llm.invoke(prompt)
+        text = getattr(resp, "content", "") or ""
+        return text.strip() or fallback_summary
+    except Exception:
+        return fallback_summary
 
 
 def _rows_from_cursor(cursor: Any) -> list[dict[str, Any]]:
@@ -80,6 +155,89 @@ def _rows_from_cursor(cursor: Any) -> list[dict[str, Any]]:
         else:
             out.append({"value": row})
     return out
+
+
+def _resolve_standalone_query(query: str, history: list[dict[str, str]]) -> str:
+    """Resolves follow-up pronouns/references using prior turns in the session."""
+    q = query.strip()
+    follow_up_markers = [
+        "that ", "those ", "same ", "it ", "them ", "what about", "which collector",
+        "which log", "how old", "who did", "why did"
+    ]
+    if history and any(m in q.lower() for m in follow_up_markers):
+        last_user = next((h["content"] for h in reversed(history) if h["role"] == "user"), "")
+        if last_user and last_user.lower() != q.lower():
+            return f"{q} (Context from previous question: {last_user})"
+    return q
+
+
+def _build_query_plan(standalone_query: str) -> QueryPlan:
+    """Interprets open-ended natural language into lenses + graph filters."""
+    if os.getenv("OPENAI_API_KEY"):
+        try:
+            from langchain_openai import ChatOpenAI
+
+            llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+            planner = llm.with_structured_output(QueryPlan)
+            return planner.invoke(
+                ONTOLOGY_SPEC
+                + "\nMap this natural-language security/governance question to a QueryPlan over "
+                + "lenses ['CDMC', 'PCI_DSS', 'NIST_800'] and filters (log_type: access|network|application, "
+                + "only_risky_credentials, min_key_age_days, data_element_keyword). "
+                + "Set filters ONLY for what this specific question asks about. "
+                + f"Question: {standalone_query}"
+            )
+        except Exception:
+            pass
+
+    ql = standalone_query.lower()
+
+    log_type: Literal["access", "network", "application"] | None = None
+    if any(w in ql for w in ["network", "http", "https", "tls", "wire", "transit", "packet"]):
+        log_type = "network"
+    elif any(w in ql for w in ["access", "login", "auth", "principal", "export"]):
+        log_type = "access"
+    elif any(w in ql for w in ["app", "application", "debug", "repo", "commit", "code"]):
+        log_type = "application"
+
+    age_match = re.search(r"(?:over|older than|more than|above|>)\s*(\d+)\s*days?", ql)
+    min_key_age_days = int(age_match.group(1)) if age_match else None
+
+    only_risky_credentials = any(
+        w in ql for w in ["exposed", "key", "keys", "credential", "expired", "aged", "rotation", "revok"]
+    )
+
+    kws: list[str] = []
+    if "cvv" in ql or "sad" in ql or "security code" in ql:
+        kws.append("CVV")
+    if "pan" in ql or "card" in ql or "cardholder" in ql or "unencrypted" in ql or "http" in ql:
+        kws.append("PAN")
+    if "catalog" in ql or "lineage" in ql or "metadata" in ql:
+        kws.append("CATALOG")
+    if "private" in ql or "signing" in ql or "key" in ql:
+        kws.append("KEY")
+    data_element_keyword: str | None = ",".join(dict.fromkeys(kws)) if kws else None
+
+    lenses: list[Literal["CDMC", "PCI_DSS", "NIST_800"]] = []
+    if any(w in ql for w in ["cdmc", "catalog", "lineage", "metadata", "classif", "govern", "mask"]):
+        lenses.append("CDMC")
+    if any(w in ql for w in ["pci", "cvv", "pan", "sad", "card", "encrypt", "http", "transit", "payment"]):
+        lenses.append("PCI_DSS")
+    if any(w in ql for w in ["nist", "800", "key", "keys", "credential", "age", "aged", "exposed", "collector", "source", "provenance", "audit log"]):
+        lenses.append("NIST_800")
+
+    if not lenses:
+        lenses = ["CDMC", "PCI_DSS", "NIST_800"]
+
+    return QueryPlan(
+        standalone_query=standalone_query,
+        lenses=lenses,
+        log_type=log_type,
+        only_risky_credentials=only_risky_credentials,
+        min_key_age_days=min_key_age_days,
+        data_element_keyword=data_element_keyword,
+        reason=f"Natural-language plan -> lenses={lenses}, log_type={log_type}, risky_creds={only_risky_credentials}, min_age={min_key_age_days}, elem={data_element_keyword}",
+    )
 
 
 def _load_graph_evidence(db_path: Path = DB_PATH) -> tuple[int, list[dict[str, Any]]]:
@@ -124,38 +282,35 @@ def _load_graph_evidence(db_path: Path = DB_PATH) -> tuple[int, list[dict[str, A
     return total_events, rows
 
 
-def _route_query_decision(query: str) -> RouteDecision:
-    q = query.lower()
-    if os.getenv("OPENAI_API_KEY"):
-        try:
-            from langchain_openai import ChatOpenAI
-
-            llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-            router_llm = llm.with_structured_output(RouteDecision)
-            return router_llm.invoke(
-                "Classify this compliance/security audit question into one or more lenses from "
-                "['CDMC', 'PCI_DSS', 'NIST_800']. Use all three for broad/full audits or "
-                "cross-framework questions. Query: " + query
-            )
-        except Exception:
-            pass
-
-    chosen: list[Literal["CDMC", "PCI_DSS", "NIST_800"]] = []
-    if any(k in q for k in ["cdmc", "catalog", "lineage", "metadata", "classification"]):
-        chosen.append("CDMC")
-    if any(k in q for k in ["pci", "cvv", "pan", "sad", "cardholder", "transit", "http"]):
-        chosen.append("PCI_DSS")
-    if any(k in q for k in ["nist", "800", "key", "credential", "age", "exposed", "provenance", "collector", "log"]):
-        chosen.append("NIST_800")
-
-    if not chosen or "full" in q or "all" in q:
-        chosen = ["CDMC", "PCI_DSS", "NIST_800"]
-
-    return RouteDecision(
-        lenses=chosen,
-        standalone_query=query,
-        reason=f"Routed to lenses {chosen} based on query intent.",
-    )
+def _apply_plan_filters(rows: list[dict[str, Any]], plan: QueryPlan) -> list[dict[str, Any]]:
+    filtered = list(rows)
+    if plan.log_type:
+        by_type = [r for r in filtered if str(r.get("log_type")) == plan.log_type]
+        if by_type:
+            filtered = by_type
+    if plan.min_key_age_days is not None:
+        by_age = [r for r in filtered if int(r.get("key_age_days", 0)) >= plan.min_key_age_days]
+        if by_age:
+            filtered = by_age
+    if plan.only_risky_credentials:
+        by_cred = [
+            r
+            for r in filtered
+            if str(r.get("credential_status")) != "active"
+            or int(r.get("key_age_days", 0)) > int(r.get("max_age_days", 90))
+        ]
+        if by_cred:
+            filtered = by_cred
+    if plan.data_element_keyword:
+        terms = [t.strip().upper() for t in plan.data_element_keyword.split(",") if t.strip()]
+        by_elem = [
+            r
+            for r in filtered
+            if any(t in str(r.get("data_element", "")).upper() for t in terms)
+            or ("PAN" in terms and str(r.get("protocol", "")).upper() == "HTTP")
+        ]
+        filtered = by_elem
+    return filtered
 
 
 def _to_citations(rows: list[dict[str, Any]]) -> list[GraphCitation]:
@@ -176,6 +331,8 @@ def _to_citations(rows: list[dict[str, Any]]) -> list[GraphCitation]:
             GraphCitation(
                 usage_id=str(r["usage_id"]),
                 log_type=str(r["log_type"]),
+                protocol=str(r["protocol"]),
+                action=str(r["action"]),
                 source_system=str(r["source_system"]),
                 collector=str(r["collector"]),
                 credential_id=str(r["credential_id"]),
@@ -193,13 +350,16 @@ def _to_citations(rows: list[dict[str, Any]]) -> list[GraphCitation]:
 
 def router_node(state: AuditState) -> dict[str, Any]:
     total_events, rows = _load_graph_evidence(DB_PATH)
-    decision = _route_query_decision(state["user_query"])
+    standalone = _resolve_standalone_query(state["user_query"], state.get("history", []))
+    plan = _build_query_plan(state["user_query"])
+    plan.standalone_query = standalone
+    matched_rows = _apply_plan_filters(rows, plan)
     return {
         "total_usage_events": total_events,
-        "evidence_rows": rows,
-        "active_lenses": decision.lenses,
-        "standalone_query": decision.standalone_query,
-        "route_reason": decision.reason,
+        "standalone_query": standalone,
+        "plan": plan.model_dump(),
+        "active_lenses": plan.lenses,
+        "evidence_rows": matched_rows,
         "findings": [],
     }
 
@@ -210,19 +370,22 @@ def cdmc_node(state: AuditState) -> dict[str, Any]:
     cdmc_rows = [r for r in state["evidence_rows"] if r["framework"] == "CDMC"]
     if not cdmc_rows:
         return {}
+    cites = _to_citations(cdmc_rows)
+    cdmc_fallback = (
+        f"Matched {len({c.usage_id for c in cites})} event(s) for \"{state['user_query']}\" "
+        f"across collectors {', '.join(sorted({c.collector for c in cites}))} involving "
+        f"{', '.join(sorted({c.data_element for c in cites}))}."
+    )
     finding = SpecialistFinding(
         lens="CDMC",
         severity="HIGH",
-        title="Data Classification, Pipeline Masking & Catalog Governance Gaps",
-        summary=(
-            f"Traced {len({r['usage_id'] for r in cdmc_rows})} CDMC-linked events across "
-            "application, network, and access logs involving SAD/CHD exposure and catalog metadata access."
-        ),
+        title="Data Classification, Pipeline Masking & Catalog Governance",
+        summary=_synthesize_grounded_answer("CDMC", state["user_query"], cites, cdmc_fallback),
         remediation=(
-            "Enforce pre-ingestion redaction/tokenization, restrict catalog lineage exports to "
-            "scoped/non-exposed credentials, and maintain data classification tags."
+            "Keep payloads scrubbed/tokenized before ingestion, restrict catalog lineage exports "
+            "to non-exposed/scoped keys, and enforce classification tags."
         ),
-        citations=_to_citations(cdmc_rows),
+        citations=cites,
     )
     return {"findings": state["findings"] + [finding.model_dump()]}
 
@@ -233,19 +396,22 @@ def pci_dss_node(state: AuditState) -> dict[str, Any]:
     pci_rows = [r for r in state["evidence_rows"] if r["framework"] == "PCI DSS v4.0.1"]
     if not pci_rows:
         return {}
+    cites = _to_citations(pci_rows)
+    pci_fallback = (
+        f"Matched {len({c.usage_id for c in cites})} PCI DSS v4.0.1 trace(s) for \"{state['user_query']}\" "
+        f"covering {', '.join(sorted({c.data_element for c in cites}))} over "
+        f"{', '.join(sorted({c.protocol for c in cites}))}."
+    )
     finding = SpecialistFinding(
         lens="PCI_DSS",
         severity="CRITICAL",
-        title="Account Data & SAD Exposure Across Storage and Transit",
-        summary=(
-            f"Traced {len({r['usage_id'] for r in pci_rows})} PCI DSS v4.0.1 violation events "
-            "covering post-authorization CVV logging and unencrypted HTTP PAN transmission."
-        ),
+        title="Account Data & SAD Protection (Storage & Transit)",
+        summary=_synthesize_grounded_answer("PCI_DSS", state["user_query"], cites, pci_fallback),
         remediation=(
-            "Eliminate SAD/CVV logging, scrub payloads prior to storage, and enforce TLS/HTTPS "
-            "across all internal and external PAN transfer paths."
+            "Prevent post-authorization SAD/CVV logging, scrub sensitive values before persistence, "
+            "and enforce encrypted transport (HTTPS/TLS) for PAN."
         ),
-        citations=_to_citations(pci_rows),
+        citations=cites,
     )
     return {"findings": state["findings"] + [finding.model_dump()]}
 
@@ -256,55 +422,62 @@ def nist_800_node(state: AuditState) -> dict[str, Any]:
     nist_rows = [r for r in state["evidence_rows"] if str(r["framework"]).startswith("NIST SP 800")]
     if not nist_rows:
         return {}
-    flagged_creds = {
-        r["credential_id"]
-        for r in nist_rows
-        if r["credential_status"] != "active" or int(r["key_age_days"]) > int(r["max_age_days"])
-    }
-    flagged_traces = {
-        r["usage_id"]
-        for r in nist_rows
-        if r["credential_status"] != "active" or int(r["key_age_days"]) > int(r["max_age_days"])
-    }
+    cites = _to_citations(nist_rows)
+    flagged_creds = sorted(
+        {
+            c.credential_id
+            for c in cites
+            if c.credential_status != "active" or c.key_age_days > c.max_age_days
+        }
+    )
+    nist_fallback = (
+        f"Matched {len({c.usage_id for c in cites})} NIST SP 800 trace(s) for \"{state['user_query']}\" "
+        f"from {', '.join(sorted({c.source_system for c in cites}))}; flagged credentials: "
+        f"{', '.join(flagged_creds) if flagged_creds else 'none in filtered subset'}."
+    )
     finding = SpecialistFinding(
         lens="NIST_800",
         severity="CRITICAL",
-        title="Log Provenance, Cryptoperiod & Exposed Private Key Risk",
-        summary=(
-            f"Across {len({r['usage_id'] for r in nist_rows})} NIST SP 800 traces (800-53, 800-57, 800-92), "
-            f"{len(flagged_creds)} exposed/over-aged credential ({', '.join(sorted(flagged_creds)) or 'none'}) "
-            f"appears across {len(flagged_traces)} high-risk trace(s)."
-        ),
+        title="Log Provenance, Key Lifecycle & Access Controls (SP 800-53 / 800-57 / 800-92)",
+        summary=_synthesize_grounded_answer("NIST_800", state["user_query"], cites, nist_fallback),
         remediation=(
-            "Revoke and rotate exposed/over-aged private keys immediately, enforce <=90-day "
-            "cryptoperiods, and verify collector/source provenance across access, network, and application logs."
+            "Revoke and rotate exposed or >90-day keys immediately and preserve collector/source "
+            "provenance across access, network, and application logs."
         ),
-        citations=_to_citations(nist_rows),
+        citations=cites,
     )
     return {"findings": state["findings"] + [finding.model_dump()]}
 
 
 def synthesizer_node(state: AuditState) -> dict[str, Any]:
+    plan = QueryPlan.model_validate(state["plan"])
     lines = [
-        f"Query      : {state['user_query']}",
-        f"Route      : {state['active_lenses']} ({state['route_reason']})",
+        f"Question   : {state['user_query']}",
+        f"Interpreted: {plan.reason}",
         f"Graph Store: {DB_PATH.name} ({state['total_usage_events']} total :Usage events)",
         "",
     ]
+    if not state["findings"]:
+        lines.append("No matching violation/risk paths found for that filter combination.")
     for f_dict in state["findings"]:
         f = SpecialistFinding.model_validate(f_dict)
         lines.append(f"[{f.lens}] ({f.severity}) {f.title}")
-        lines.append(f"  Summary     : {f.summary}")
+        lines.append(f"  Answer      : {f.summary}")
         lines.append(f"  Remediation : {f.remediation}")
         lines.append(f"  Citations ({len(f.citations)}):")
         for c in f.citations:
             lines.append(
-                f"    - {c.usage_id} [{c.log_type} @ {c.source_system}/{c.collector}] "
+                f"    - {c.usage_id} [{c.log_type}/{c.protocol} @ {c.source_system}/{c.collector}] "
                 f"| cred={c.credential_id} ({c.credential_status}, age={c.key_age_days}/{c.max_age_days}d) "
                 f"| elem={c.data_element} | rule={c.rule_code} -> {c.control_code} ({c.framework})"
             )
         lines.append("")
-    return {"final_report": "\n".join(lines).strip()}
+
+    updated_history = list(state.get("history", [])) + [
+        {"role": "user", "content": state["user_query"]},
+        {"role": "assistant", "content": f"Reviewed {len(state['findings'])} lens(es) for: {state['user_query']}"},
+    ]
+    return {"final_report": "\n".join(lines).strip(), "history": updated_history}
 
 
 def build_audit_graph():
@@ -325,13 +498,43 @@ def build_audit_graph():
     return builder.compile(checkpointer=MemorySaver())
 
 
-if __name__ == "__main__":
+def run_chat_loop(thread_id: str = "omniguard-chat-1") -> None:
     app = build_audit_graph()
-    config = {"configurable": {"thread_id": "omniguard-demo-1"}}
-
-    out1 = app.invoke({"user_query": "Check exposed private keys and catalog metadata risks"}, config=config)
-    print(out1["final_report"])
+    config = {"configurable": {"thread_id": thread_id}}
+    print("OmniGuard Natural-Language Assistant (type 'exit' or 'quit' to stop)")
     print("-" * 72)
-    out2 = app.invoke({"user_query": "Run full compliance audit across all frameworks"}, config=config)
-    print(out2["final_report"])
+    while True:
+        try:
+            q = input("\nAsk a compliance/risk question: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nExiting chat.")
+            break
+        if not q:
+            continue
+        if q.lower() in {"exit", "quit"}:
+            print("Exiting chat.")
+            break
+        snap = app.get_state(config)
+        hist = snap.values.get("history", []) if snap and snap.values else []
+        out = app.invoke({"user_query": q, "history": hist}, config=config)
+        print("\n" + out["final_report"])
 
+
+if __name__ == "__main__":
+    import sys
+
+    if "--chat" in sys.argv:
+        run_chat_loop()
+    else:
+        app = build_audit_graph()
+        config = {"configurable": {"thread_id": "omniguard-nl-demo"}}
+        prompts = [
+            "Did any old private keys over 90 days touch catalog lineage metadata?",
+            "What about unencrypted card traffic or CVV leaks?",
+        ]
+        for p in prompts:
+            snap = app.get_state(config)
+            hist = snap.values.get("history", []) if snap and snap.values else []
+            res = app.invoke({"user_query": p, "history": hist}, config=config)
+            print(res["final_report"])
+            print("-" * 72)
