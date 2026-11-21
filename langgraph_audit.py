@@ -1,5 +1,5 @@
 ﻿"""
-OmniGuard — Natural-Language LangGraph Compliance & Key-Risk Runner
+OmniGuard - Natural-Language LangGraph Compliance & Key-Risk Runner
 Handles open-ended natural-language queries and follow-up turns over `omniguard.rl`
 using LangGraph StateGraph + MemorySaver + Pydantic structured models.
 
@@ -23,7 +23,7 @@ class QueryPlan(BaseModel):
     standalone_query: str = Field(
         description="Natural-language query resolved with prior conversation context"
     )
-    lenses: list[Literal["CDMC", "PCI_DSS", "NIST_800"]] = Field(
+    lenses: list[Literal["CDMC", "PCI_DSS", "NIST_800", "OWASP"]] = Field(
         description="Relevant compliance/risk lenses for the question"
     )
     log_type: Literal["access", "network", "application"] | None = Field(
@@ -37,6 +37,9 @@ class QueryPlan(BaseModel):
     )
     data_element_keyword: str | None = Field(
         default=None, description="Optional data element focus such as CVV, PAN, KEY, or CATALOG"
+    )
+    source_system_keyword: str | None = Field(
+        default=None, description="Optional source system focus such as STAGING, PAYMENT, CATALOG, or SENSOR"
     )
     reason: str = Field(description="Concise explanation of how the query was interpreted")
 
@@ -59,7 +62,7 @@ class GraphCitation(BaseModel):
 
 
 class SpecialistFinding(BaseModel):
-    lens: Literal["CDMC", "PCI_DSS", "NIST_800"]
+    lens: Literal["CDMC", "PCI_DSS", "NIST_800", "OWASP"]
     severity: Literal["CRITICAL", "HIGH", "MEDIUM"]
     title: str
     summary: str
@@ -182,8 +185,8 @@ def _build_query_plan(standalone_query: str) -> QueryPlan:
             return planner.invoke(
                 ONTOLOGY_SPEC
                 + "\nMap this natural-language security/governance question to a QueryPlan over "
-                + "lenses ['CDMC', 'PCI_DSS', 'NIST_800'] and filters (log_type: access|network|application, "
-                + "only_risky_credentials, min_key_age_days, data_element_keyword). "
+                + "lenses ['CDMC', 'PCI_DSS', 'NIST_800', 'OWASP'] and filters (log_type: access|network|application, "
+                + "only_risky_credentials, min_key_age_days, data_element_keyword, source_system_keyword). "
                 + "Set filters ONLY for what this specific question asks about. "
                 + f"Question: {standalone_query}"
             )
@@ -218,9 +221,18 @@ def _build_query_plan(standalone_query: str) -> QueryPlan:
         kws.append("KEY")
     data_element_keyword: str | None = ",".join(dict.fromkeys(kws)) if kws else None
 
-    lenses: list[Literal["CDMC", "PCI_DSS", "NIST_800"]] = []
-    if any(w in ql for w in ["cdmc", "catalog", "lineage", "metadata", "classif", "govern", "mask"]):
+    lenses: list[Literal["CDMC", "PCI_DSS", "NIST_800", "OWASP"]] = []
+    if any(w in ql for w in ["cdmc", "catalog", "lineage", "metadata", "classif", "govern", "mask", "pii", "export", "bulk"]):
         lenses.append("CDMC")
+    if any(w in ql for w in ["owasp", "staging", "portal", "hardcoded", "debug", "html", "breach", "misconfig"]):
+        lenses.append("OWASP")
+    source_system_keyword: str | None = None
+    if "staging" in ql or "portal" in ql:
+        source_system_keyword = "STAGING"
+    elif "payment" in ql:
+        source_system_keyword = "PAYMENT"
+    elif "sensor" in ql:
+        source_system_keyword = "SENSOR"
     if any(w in ql for w in ["pci", "cvv", "pan", "sad", "card", "encrypt", "http", "transit", "payment"]):
         lenses.append("PCI_DSS")
     if any(w in ql for w in ["nist", "800", "key", "keys", "credential", "age", "aged", "exposed", "collector", "source", "provenance", "audit log"]):
@@ -236,7 +248,8 @@ def _build_query_plan(standalone_query: str) -> QueryPlan:
         only_risky_credentials=only_risky_credentials,
         min_key_age_days=min_key_age_days,
         data_element_keyword=data_element_keyword,
-        reason=f"Natural-language plan -> lenses={lenses}, log_type={log_type}, risky_creds={only_risky_credentials}, min_age={min_key_age_days}, elem={data_element_keyword}",
+        source_system_keyword=source_system_keyword,
+        reason=f"Natural-language plan -> lenses={lenses}, log_type={log_type}, risky_creds={only_risky_credentials}, min_age={min_key_age_days}, elem={data_element_keyword}, src={source_system_keyword}",
     )
 
 
@@ -279,11 +292,30 @@ def _load_graph_evidence(db_path: Path = DB_PATH) -> tuple[int, list[dict[str, A
             """
         )
     )
+    causal_rows = _rows_from_cursor(
+        db.execute("MATCH (u1:Usage)-[:ENABLED]->(u2:Usage) RETURN u1.usage_id AS src_id, u2.usage_id AS dst_id")
+    )
+    enabled_by_map: dict[str, list[str]] = {}
+    enables_map: dict[str, list[str]] = {}
+    for cr in causal_rows:
+        s_id = str(cr.get("src_id", ""))
+        d_id = str(cr.get("dst_id", ""))
+        enabled_by_map.setdefault(d_id, []).append(s_id)
+        enables_map.setdefault(s_id, []).append(d_id)
+    for r in rows:
+        uid = str(r.get("usage_id", ""))
+        r["enabled_by"] = enabled_by_map.get(uid, [])
+        r["enables"] = enables_map.get(uid, [])
     return total_events, rows
 
 
 def _apply_plan_filters(rows: list[dict[str, Any]], plan: QueryPlan) -> list[dict[str, Any]]:
     filtered = list(rows)
+    if plan.source_system_keyword:
+        src_kw = plan.source_system_keyword.strip().upper()
+        by_src = [r for r in filtered if src_kw in str(r.get("source_system", "")).upper()]
+        if by_src:
+            filtered = by_src
     if plan.log_type:
         by_type = [r for r in filtered if str(r.get("log_type")) == plan.log_type]
         if by_type:
@@ -310,6 +342,21 @@ def _apply_plan_filters(rows: list[dict[str, Any]], plan: QueryPlan) -> list[dic
             or ("PAN" in terms and str(r.get("protocol", "")).upper() == "HTTP")
         ]
         filtered = by_elem
+    # Causal kill-chain expansion: include upstream :Usage events that ENABLED matched violations
+    matched_ids = {str(r.get("usage_id", "")) for r in filtered}
+    linked_ids: set[str] = set()
+    for r in filtered:
+        for rel_id in r.get("enabled_by", []) + r.get("enables", []):
+            if rel_id not in matched_ids:
+                linked_ids.add(rel_id)
+    if linked_ids:
+        existing_keys = {(r.get("usage_id"), r.get("control_code")) for r in filtered}
+        for r in rows:
+            if str(r.get("usage_id", "")) in linked_ids:
+                k = (r.get("usage_id"), r.get("control_code"))
+                if k not in existing_keys:
+                    filtered.append(r)
+                    existing_keys.add(k)
     return filtered
 
 
@@ -449,35 +496,153 @@ def nist_800_node(state: AuditState) -> dict[str, Any]:
     return {"findings": state["findings"] + [finding.model_dump()]}
 
 
+def owasp_node(state: AuditState) -> dict[str, Any]:
+    plan = QueryPlan.model_validate(state["plan"])
+    if "OWASP" not in plan.lenses:
+        return {}
+    matched = [r for r in state["evidence_rows"] if "OWASP" in str(r.get("framework", "")).upper()]
+    if not matched:
+        return {}
+    citations = _to_citations(matched)
+    systems = sorted({c.source_system for c in citations})
+    controls = sorted({c.control_code for c in citations})
+    fallback_text = (
+        f"Matched {len(citations)} OWASP Top 10 finding(s) for '{plan.standalone_query}' "
+        f"on {', '.join(systems)} ({', '.join(controls)})."
+    )
+    summary = _synthesize_grounded_answer(lens="OWASP", user_query=plan.standalone_query, citations=citations, fallback_summary=fallback_text)
+    finding = SpecialistFinding(
+        lens="OWASP",
+        severity="CRITICAL",
+        title="Application Security Misconfiguration & Embedded Secrets (OWASP Top 10:2025)",
+        summary=summary,
+        remediation="Remove hardcoded tokens/debug endpoints from public HTML/JS, enforce CI/CD secret scanning, and restrict staging access.",
+        citations=citations,
+    )
+    return {"findings": list(state.get("findings", [])) + [finding.model_dump()]}
+
+
+
+CONTROL_EXPLANATIONS: dict[str, str] = {
+    "OWASP-2025-A02": "Security Misconfiguration ? hardcoded secrets or debug endpoints left in public web code",
+    "NIST-800-53-IA-5(7)": "No Embedded Static Authenticators ? passwords/tokens must never be hardcoded in source or HTML",
+    "NIST-800-53-IA-5": "Authenticator Management ? compromised or expired (>90-day) credentials must be revoked and rotated",
+    "NIST-800-53-AU-2": "Event Logging Governance ? sensitive authentication data (like CVV) must never be written to logs",
+    "NIST-800-53-SC-8": "Transmission Confidentiality ? sensitive data must be encrypted in transit (HTTPS/TLS, not plain HTTP)",
+    "NIST-800-57-P1": "Cryptographic Key Lifecycle ? private signing keys must not be exposed or exceed rotation limits",
+    "NIST-800-92-S3": "Log Management & Provenance ? audit logs must preserve verified collector and source-system attribution",
+    "CDMC-04": "Cloud Data Protection & Export Governance ? restricted PII and catalog metadata must be protected from unauthorized bulk export",
+    "CDMC-09": "Sensitive Data Scrubbing & Masking ? regulated fields (CVV/PAN) must be masked before storage or transit",
+    "PCI-3.3.1.2": "No Post-Auth CVV Storage ? card security codes (CVV/CVC) must never be stored in files or logs after authorization",
+    "PCI-4.2.1": "Strong Cryptography in Transit ? cardholder numbers (PAN) must never travel over unencrypted HTTP",
+}
+
+
+def _build_human_report(state: AuditState, plan: QueryPlan) -> str:
+    findings = [SpecialistFinding.model_validate(f) for f in state.get("findings", [])]
+    if not findings:
+        return (
+            "Executive Summary:\n"
+            "  No security or compliance violations were found matching your question.\n"
+        )
+
+    # Deduplicate citations by (usage_id, control_code)
+    all_citations: list[GraphCitation] = []
+    seen_cit: set[tuple[str, str]] = set()
+    for f in findings:
+        for c in f.citations:
+            key = (c.usage_id, c.control_code)
+            if key not in seen_cit:
+                seen_cit.add(key)
+                all_citations.append(c)
+
+    systems = sorted({c.source_system for c in all_citations})
+    collectors = sorted({c.collector for c in all_citations})
+    elements = sorted({c.data_element for c in all_citations})
+    risky_creds = sorted({
+        f"{c.credential_id} ({c.credential_status}, {c.key_age_days}d old vs {c.max_age_days}d policy)"
+        for c in all_citations
+        if c.credential_status != "active" or c.key_age_days > c.max_age_days
+    })
+
+    # Detect causal kill-chain links from evidence_rows
+    chains: list[str] = []
+    seen_chains: set[tuple[str, str]] = set()
+    for r in state.get("evidence_rows", []):
+        u_id = str(r.get("usage_id", ""))
+        for dst in r.get("enables", []):
+            if (u_id, dst) not in seen_chains:
+                seen_chains.add((u_id, dst))
+                chains.append(
+                    f"{u_id} (root-cause credential leak) directly enabled {dst} (unauthorized bulk data export)"
+                )
+
+    ql = state["user_query"].lower()
+    is_priority_q = any(w in ql for w in ["priorit", "first", "remediat", "fix first"])
+
+    lines: list[str] = []
+    lines.append("EXECUTIVE SUMMARY")
+    lines.append("-" * 72)
+    if is_priority_q:
+        lines.append(
+            f"Your team has {len({c.usage_id for c in all_citations})} active risk event(s) across "
+            f"{', '.join(systems)}. Address the Critical credential/exposure items first before routine hardening."
+        )
+    else:
+        lines.append(
+            f"Yes ? OmniGuard flagged {len({c.usage_id for c in all_citations})} security/compliance event(s) "
+            f"on {', '.join(systems)} (captured by {', '.join(collectors)}) involving {', '.join(elements)}."
+        )
+        if risky_creds:
+            lines.append(f"Compromised / Over-Aged Credentials: {'; '.join(risky_creds)}.")
+        if chains:
+            lines.append(f"Attack Chain (Root Cause -> Impact): {'; '.join(chains)}.")
+
+    lines.append("")
+    lines.append("WHAT THIS MEANS (PLAIN-ENGLISH COMPLIANCE IMPACT)")
+    lines.append("-" * 72)
+    seen_ctrl: set[str] = set()
+    for c in all_citations:
+        if c.control_code in seen_ctrl:
+            continue
+        seen_ctrl.add(c.control_code)
+        meaning = CONTROL_EXPLANATIONS.get(c.control_code, f"{c.framework} control violation")
+        lines.append(f"  * {c.control_code} ({c.framework}): {meaning}.")
+
+    lines.append("")
+    lines.append("PRIORITIZED RECOMMENDED ACTIONS")
+    lines.append("-" * 72)
+    sev_rank = {"CRITICAL": 1, "HIGH": 2, "MEDIUM": 3, "LOW": 4}
+    ranked_findings = sorted(findings, key=lambda x: sev_rank.get(x.severity.upper(), 9))
+    seen_rem: set[str] = set()
+    step = 1
+    for f in ranked_findings:
+        if f.remediation not in seen_rem:
+            seen_rem.add(f.remediation)
+            lines.append(f"  P{step} [{f.severity} - {f.lens}]: {f.remediation}")
+            step += 1
+
+    lines.append("")
+    lines.append(f"AUDIT EVIDENCE TRAIL ({DB_PATH.name} | {state['total_usage_events']} total events scanned)")
+    lines.append("-" * 72)
+    for c in all_citations:
+        lines.append(
+            f"  - {c.usage_id} on {c.source_system} (via {c.collector}, {c.log_type}/{c.protocol}) | "
+            f"Data: {c.data_element} | Cred: {c.credential_id} ({c.credential_status}, {c.key_age_days}/{c.max_age_days}d) | "
+            f"Control: {c.control_code}"
+        )
+
+    return "\n".join(lines)
+
+
 def synthesizer_node(state: AuditState) -> dict[str, Any]:
     plan = QueryPlan.model_validate(state["plan"])
-    lines = [
-        f"Question   : {state['user_query']}",
-        f"Interpreted: {plan.reason}",
-        f"Graph Store: {DB_PATH.name} ({state['total_usage_events']} total :Usage events)",
-        "",
-    ]
-    if not state["findings"]:
-        lines.append("No matching violation/risk paths found for that filter combination.")
-    for f_dict in state["findings"]:
-        f = SpecialistFinding.model_validate(f_dict)
-        lines.append(f"[{f.lens}] ({f.severity}) {f.title}")
-        lines.append(f"  Answer      : {f.summary}")
-        lines.append(f"  Remediation : {f.remediation}")
-        lines.append(f"  Citations ({len(f.citations)}):")
-        for c in f.citations:
-            lines.append(
-                f"    - {c.usage_id} [{c.log_type}/{c.protocol} @ {c.source_system}/{c.collector}] "
-                f"| cred={c.credential_id} ({c.credential_status}, age={c.key_age_days}/{c.max_age_days}d) "
-                f"| elem={c.data_element} | rule={c.rule_code} -> {c.control_code} ({c.framework})"
-            )
-        lines.append("")
-
+    report = _build_human_report(state, plan)
     updated_history = list(state.get("history", [])) + [
         {"role": "user", "content": state["user_query"]},
-        {"role": "assistant", "content": f"Reviewed {len(state['findings'])} lens(es) for: {state['user_query']}"},
+        {"role": "assistant", "content": report},
     ]
-    return {"final_report": "\n".join(lines).strip(), "history": updated_history}
+    return {"final_report": report, "history": updated_history}
 
 
 def build_audit_graph():
@@ -486,13 +651,15 @@ def build_audit_graph():
     builder.add_node("cdmc_agent", cdmc_node)
     builder.add_node("pci_dss_agent", pci_dss_node)
     builder.add_node("nist_800_agent", nist_800_node)
+    builder.add_node("owasp_agent", owasp_node)
     builder.add_node("synthesizer", synthesizer_node)
 
     builder.add_edge(START, "router")
     builder.add_edge("router", "cdmc_agent")
     builder.add_edge("cdmc_agent", "pci_dss_agent")
     builder.add_edge("pci_dss_agent", "nist_800_agent")
-    builder.add_edge("nist_800_agent", "synthesizer")
+    builder.add_edge("nist_800_agent", "owasp_agent")
+    builder.add_edge("owasp_agent", "synthesizer")
     builder.add_edge("synthesizer", END)
 
     return builder.compile(checkpointer=MemorySaver())
@@ -538,3 +705,4 @@ if __name__ == "__main__":
             res = app.invoke({"user_query": p, "history": hist}, config=config)
             print(res["final_report"])
             print("-" * 72)
+
