@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>OmniGuard — Autonomous Graph Defense Dashboard</title>
+<style>
+  :root {
+    --bg: #0b1120; --card: #111827; --border: #1f2937;
+    --text: #f3f4f6; --muted: #9ca3af;
+    --red: #ef4444; --amber: #f59e0b; --green: #10b981; --indigo: #6366f1;
+  }
+  * { box-sizing: border-box; font-family: 'Segoe UI', system-ui, sans-serif; }
+  body { margin: 0; background: var(--bg); color: var(--text); padding: 26px; }
+  .wrap { max-width: 1200px; margin: 0 auto; }
+  .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 22px; }
+  .title h1 { margin: 0; font-size: 25px; letter-spacing: -0.4px; }
+  .title p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+  .badge { padding: 8px 16px; border-radius: 999px; font-weight: 700; font-size: 12px; background: rgba(16,185,129,0.15); color: var(--green); border: 1px solid var(--green); }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 20px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 18px; }
+  .card.p1 { border-top: 3px solid var(--red); }
+  .card.p2 { border-top: 3px solid var(--amber); }
+  .card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .card-head h2 { margin: 0; font-size: 15px; letter-spacing: 0.3px; }
+  .sev { padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; }
+  .sev.p1 { background: rgba(239,68,68,0.18); color: #fca5a5; }
+  .sev.p2 { background: rgba(245,158,11,0.18); color: #fcd34d; }
+  .box { background: #090e1a; border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 10px; font-size: 13px; }
+  .pill-row { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 12px; }
+  .pill { padding: 4px 8px; border-radius: 5px; font-size: 11px; font-weight: 600; }
+  .pill.red { background: rgba(239,68,68,0.18); color: #fca5a5; border: 1px solid rgba(239,68,68,0.35); }
+  .pill.amber { background: rgba(245,158,11,0.18); color: #fcd34d; border: 1px solid rgba(245,158,11,0.35); }
+  .pill.muted { background: rgba(156,163,175,0.12); color: var(--muted); border: 1px solid var(--border); }
+  .soar { font-size: 13px; line-height: 1.5; }
+  .check { color: var(--green); font-weight: 900; margin-right: 6px; }
+  .briefing { background: #090e1a; border: 1px solid var(--border); border-radius: 10px; padding: 16px; font-family: Consolas, monospace; font-size: 12.5px; line-height: 1.55; white-space: pre-wrap; color: #e5e7eb; overflow-x: auto; }
+  .meta { color: var(--muted); font-size: 12px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="header">
+    <div class="title">
+      <h1>OmniGuard: Autonomous Graph Defense</h1>
+      <p>Powered by Relate Embedded Graph (<code>omniguard_demo.rl</code>) &bull; Proportional SOAR Containment</p>
+    </div>
+    <div class="badge">&#10003; 2 PLAYBOOKS EXECUTED &amp; AUDITED</div>
+  </div>
+
+  <div class="two-col">
+    <div class="card p1">
+      <div class="card-head">
+        <h2>Scenario A: Staging Portal Breach (Malicious)</h2>
+        <span class="sev p1">P1 CRITICAL &bull; HARD CONTAINMENT</span>
+      </div>
+      <div class="box">
+        <strong>Kill Chain (IoA):</strong> <code>BREACH_SIM_01</code> (Hardcoded HTML token) &rarr; <code>[:ENABLED]</code> &rarr; <code>BREACH_SIM_02</code> (2,500 <code>PERSONNEL_PII_RECORDS</code> exported via <code>CRED_STG_ADMIN_01</code>).
+      </div>
+      <div class="pill-row">
+        <span class="pill red">OWASP-2025-A02</span>
+        <span class="pill red">NIST 800-53 IA-5(7)</span>
+        <span class="pill amber">CDMC-04 Cloud PII</span>
+        <span class="pill muted">PCI DSS: N/A</span>
+      </div>
+      <div class="soar">
+        <div><span class="check">&#10003;</span><strong>Playbook:</strong> <code>SOAR-CRED-REVOKE-01</code></div>
+        <div><span class="check">&#10003;</span><strong>Graph Action:</strong> <code>CRED_STG_ADMIN_01</code> flipped <code>exposed</code> &rarr; <code>revoked</code></div>
+        <div><span class="check">&#10003;</span><strong>Audit Node:</strong> <code>(:RemediationAction)</code> linked to breach chain; CISO &amp; SOC paged</div>
+      </div>
+    </div>
+
+    <div class="card p2">
+      <div class="card-head">
+        <h2>Scenario B: Shared Container Admin (Accidental)</h2>
+        <span class="sev p2">P2-HIGH &bull; GOVERNANCE PLAYBOOK</span>
+      </div>
+      <div class="box">
+        <strong>Anomaly (IoA):</strong> Privileged <code>CRED_CONT_ADMIN_01</code> used from 2 hosts (<code>LAPTOP-ADMIN-01</code> &amp; <code>LAPTOP-OPS-04</code>) to pull connectivity-agent logs containing <strong>employee emails</strong> &amp; <strong>table/column names</strong>.
+      </div>
+      <div class="pill-row">
+        <span class="pill red">NIST IA-2 / IA-5 / AU-2</span>
+        <span class="pill red">NIST 800-92 Log Scrub</span>
+        <span class="pill amber">CDMC-04 / CDMC-09</span>
+        <span class="pill muted">PCI DSS: N/A</span>
+      </div>
+      <div class="soar">
+        <div><span class="check">&#10003;</span><strong>Playbook:</strong> <code>SOAR-CRED-SHARE-02</code></div>
+        <div><span class="check">&#10003;</span><strong>Graph Action:</strong> <code>CRED_CONT_ADMIN_01</code> set to <code>rotation_required</code>; secondary session dropped</div>
+        <div><span class="check">&#10003;</span><strong>Root-Cause Fix:</strong> Opened log-masking ticket (emails) &amp; individual read-only RBAC</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>Live Executive Briefing (Generated from Relate Graph)</h2>
+      <span class="meta">Executed: 2026-11-25 15:57:44 UTC</span>
+    </div>
+    <div class="briefing">EXECUTIVE SUMMARY
+------------------------------------------------------------------------
+Yes — OmniGuard flagged 1 security/compliance event(s) on MetadataCatalogGateway (captured by WazuhAuditdCollector) involving CATALOG_LINEAGE_METADATA.
+Compromised / Over-Aged Credentials: CRED_CAT_PRIVKEY_99 (exposed, 410d old vs 90d policy).
+
+WHAT THIS MEANS (PLAIN-ENGLISH COMPLIANCE IMPACT)
+------------------------------------------------------------------------
+  * CDMC-04 (CDMC): Cloud Data Protection &amp; Export Governance ? restricted PII and catalog metadata must be protected from unauthorized bulk export.
+  * NIST-800-53-IA-5 (NIST SP 800-53): Authenticator Management ? compromised or expired (&gt;90-day) credentials must be revoked and rotated.
+  * NIST-800-92-S3 (NIST SP 800-92): Log Management &amp; Provenance ? audit logs must preserve verified collector and source-system attribution.
+
+PRIORITIZED RECOMMENDED ACTIONS
+------------------------------------------------------------------------
+  P1 [CRITICAL - NIST_800]: Revoke and rotate exposed or &gt;90-day keys immediately and preserve collector/source provenance across access, network, and application logs.
+  P2 [HIGH - CDMC]: Keep payloads scrubbed/tokenized before ingestion, restrict catalog lineage exports to non-exposed/scoped keys, and enforce classification tags.
+
+AUDIT EVIDENCE TRAIL (omniguard_demo.rl | 36 total events scanned)
+------------------------------------------------------------------------
+  - LOG_VIOLATION_04 on MetadataCatalogGateway (via WazuhAuditdCollector, access/HTTPS) | Data: CATALOG_LINEAGE_METADATA | Cred: CRED_CAT_PRIVKEY_99 (exposed, 410/90d) | Control: CDMC-04
+  - LOG_VIOLATION_04 on MetadataCatalogGateway (via WazuhAuditdCollector, access/HTTPS) | Data: CATALOG_LINEAGE_METADATA | Cred: CRED_CAT_PRIVKEY_99 (exposed, 410/90d) | Control: NIST-800-53-IA-5
+  - LOG_VIOLATION_04 on MetadataCatalogGateway (via WazuhAuditdCollector, access/HTTPS) | Data: CATALOG_LINEAGE_METADATA | Cred: CRED_CAT_PRIVKEY_99 (exposed, 410/90d) | Control: NIST-800-92-S3</div>
+  </div>
+</div>
+</body>
+</html>
