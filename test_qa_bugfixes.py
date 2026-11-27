@@ -22,7 +22,7 @@ class TestQABugFixes(unittest.TestCase):
         cls.orig_log = test_portal.LOG_FILE
         test_portal.LOG_FILE = str(cls.log_path)
 
-        cls.server = HTTPServer(("127.0.0.1", 0), test_portal.PortalHandler)
+        cls.server = HTTPServer(("127.0.0.1", 0), test_portal.PaymentPortalHandler)
         cls.base_url = f"http://127.0.0.1:{cls.server.server_address[1]}"
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()

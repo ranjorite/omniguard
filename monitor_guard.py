@@ -1,33 +1,32 @@
 ﻿import html
 import json
 import shutil
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
 import langgraph_audit
 
-BASE_DB = Path("omniguard.rl")
-DEMO_DB = Path("omniguard_demo.rl")
+from omniguard_runtime import BASE_DIR, query_relate_rows, resolve_db_path
+
+BASE_DB = resolve_db_path()
+DEMO_DB = Path(BASE_DIR / "omniguard_demo.rl")
 EVENTS_FILE = Path("portal_events.jsonl")
 DASHBOARD_FILE = Path("dashboard.html")
 
 
 def run_cypher(db_path: Path, query: str) -> list[dict]:
-    cmd = ["relate", "query", query, "--database", str(db_path)]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"relate query failed (exit {proc.returncode}):\n{proc.stderr}")
-    raw = proc.stdout.strip()
-    if not raw:
+    rows = query_relate_rows(query, resolve_db_path(db_path))
+    if not rows:
         return []
-    try:
-        data = json.loads(raw)
-        if isinstance(data, dict) and "rows" in data:
-            return data["rows"]
-        return data if isinstance(data, list) else [{"output": data}]
-    except json.JSONDecodeError:
-        return [{"output": raw}]
+    out = []
+    for r in rows:
+        if isinstance(r, dict):
+            out.append(r)
+        elif isinstance(r, (list, tuple)):
+            out.append({"values": list(r)})
+        else:
+            out.append({"output": str(r)})
+    return out
 
 
 def ingest_portal_events(db_path: Path, events_path: Path, timestamp: str) -> int:
@@ -39,7 +38,7 @@ def ingest_portal_events(db_path: Path, events_path: Path, timestamp: str) -> in
         c.allowed_targets = 'StagingCareerPortal',
         c.key_age_days = 120,
         c.max_age_days = 90,
-        c.status = 'exposed'
+        c.status = 'EXPOSED'
     MERGE (u1:Usage {{usage_id: 'BREACH_SIM_01'}})
     SET u1.system = 'StagingCareerPortal',
         u1.action = 'Hardcoded admin token scraped from public landing page HTML',
@@ -61,7 +60,7 @@ def run_scenario_a_soar(db_path: Path, timestamp: str) -> dict:
     """P1 Critical: Hardcoded staging token -> 2,500 PII export -> Hard Containment."""
     remediation_q = f"""
     MATCH (u1:Usage {{usage_id: 'BREACH_SIM_01'}})-[:ENABLED]->(u2:Usage {{usage_id: 'BREACH_SIM_02'}})-[:USED_CREDENTIAL]->(c:Credential {{cred_id: 'CRED_STG_ADMIN_01'}})
-    SET c.status = 'revoked', c.revoked_at = '{timestamp}'
+    SET c.status = 'REVOKED', c.revoked_at = '{timestamp}'
     MERGE (r:RemediationAction {{action_id: 'SOAR-CRED-REVOKE-01'}})
     SET r.playbook = 'SOAR-CRED-REVOKE-01',
         r.severity = 'P1_CRITICAL',

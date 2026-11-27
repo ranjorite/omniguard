@@ -36,7 +36,7 @@ class TestPortalSimulation(unittest.TestCase):
         test_portal.LOG_FILE = str(cls.log_path)
 
         # Bind to port 0 so OS assigns a free ephemeral port (zero port conflicts)
-        cls.server = HTTPServer(("127.0.0.1", 0), test_portal.PortalHandler)
+        cls.server = HTTPServer(("127.0.0.1", 0), test_portal.PaymentPortalHandler)
         cls.port = cls.server.server_address[1]
         cls.base_url = f"http://127.0.0.1:{cls.port}"
 

@@ -233,7 +233,7 @@ CREDENTIALS = [
         "cred_type": "mtls_client_cert",
         "key_age_days": 34,
         "max_age_days": 90,
-        "status": "active",
+        "status": "ACTIVE",
         "allowed_targets": "PaymentGatewayAPI",
     },
     {
@@ -241,7 +241,7 @@ CREDENTIALS = [
         "cred_type": "service_token",
         "key_age_days": 45,
         "max_age_days": 90,
-        "status": "active",
+        "status": "ACTIVE",
         "allowed_targets": "AnalyticsIngestEndpoint",
     },
     {
@@ -249,7 +249,7 @@ CREDENTIALS = [
         "cred_type": "private_key",
         "key_age_days": 410,
         "max_age_days": 90,
-        "status": "exposed",
+        "status": "EXPOSED",
         "allowed_targets": "MetadataCatalogService",
     },
     {
@@ -257,7 +257,7 @@ CREDENTIALS = [
         "cred_type": "private_key",
         "key_age_days": 12,
         "max_age_days": 90,
-        "status": "active",
+        "status": "ACTIVE",
         "allowed_targets": "MetadataCatalogService",
     },
 ]

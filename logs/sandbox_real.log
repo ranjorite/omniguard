@@ -1,0 +1,66 @@
+2026-11-25 09:24:11.766 IST [12960] LOG:  starting PostgreSQL 13.3, compiled by Visual C++ build 1914, 64-bit
+2026-11-25 09:24:11.769 IST [12960] LOG:  listening on IPv4 address "127.0.0.1", port 5544
+2026-11-25 09:24:11.935 IST [30780] LOG:  database system was shut down at 2026-11-25 09:24:10 IST
+2026-11-25 09:24:12.667 IST [12960] LOG:  database system is ready to accept connections
+2026-11-25 09:25:03.975 IST [12960] LOG:  received fast shutdown request
+2026-11-25 09:25:03.979 IST [12960] LOG:  aborting any active transactions
+2026-11-25 09:25:03.990 IST [12960] LOG:  background worker "logical replication launcher" (PID 35700) exited with exit code 1
+2026-11-25 09:25:04.004 IST [16368] LOG:  shutting down
+2026-11-25 09:25:04.564 IST [12960] LOG:  database system is shut down
+2026-11-25 09:25:11.836 IST [34308] LOG:  starting PostgreSQL 13.3, compiled by Visual C++ build 1914, 64-bit
+2026-11-25 09:25:11.838 IST [34308] LOG:  listening on IPv4 address "127.0.0.1", port 5544
+2026-11-25 09:25:12.056 IST [10616] LOG:  database system was shut down at 2026-11-25 09:25:04 IST
+2026-11-25 09:25:12.806 IST [34308] LOG:  database system is ready to accept connections
+2026-11-25 10:09:39.603 IST [29880] FATAL:  terminating autovacuum process due to administrator command
+2026-11-25 10:11:09.198 IST [20268] ERROR:  new row for relation "lab_result" violates check constraint "lab_result_value_ck"
+2026-11-25 10:11:09.198 IST [20268] DETAIL:  Failing row contains (114, 110, 112, 2023-03-12 01:10:00, 12.10000, x, 10*3/uL, 4.00000, 11.00000, H).
+2026-11-25 10:11:09.198 IST [20268] STATEMENT:  INSERT INTO lab_result SELECT map.id('A','lr',lab_result_id::text),map.id('A','lo',lab_order_id::text),map.id('REF','loinc',loinc_code),result_utc AT TIME ZONE 'UTC' AT TIME ZONE time_zone,result_number,coalesce(result_text,'x'),CASE WHEN result_number IS NOT NULL THEN coalesce(unit_ucum,'1') END,ref_low,ref_high,flag FROM hosp_a.lab_component_result JOIN hosp_a.lab_order USING (lab_order_id) JOIN map.a_enc USING (encounter_id);
+2026-11-25 10:11:09.678 IST [4712] FATAL:  terminating autovacuum process due to administrator command
+2026-11-25 10:14:01.709 IST [19796] ERROR:  new row for relation "postal_address" violates check constraint "postal_address_postal_code_ck"
+2026-11-25 10:14:01.709 IST [19796] DETAIL:  Failing row contains (224, POSTAL, 4 Pine, null, Boston, 2, 2134, null, null).
+2026-11-25 10:14:01.709 IST [19796] CONTEXT:  SQL statement "INSERT INTO canon.postal_address(contact_mechanism_id,contact_mechanism_type_code,address_line_1,city_name,state_geo_id,postal_code)
+	  VALUES (i,'POSTAL',line,c,map.state(st),CASE WHEN zip ~ '^[0-9]{3,4}$' THEN zip ELSE zip END)"
+	PL/pgSQL function map.address(text,text,text,text,text,text,text) line 4 at SQL statement
+2026-11-25 10:14:01.709 IST [19796] STATEMENT:  INSERT INTO party_contact_mechanism SELECT pid,map.address('B','pataddr',mrn,addr,city,st,zip),'HOME',(SELECT valid_from FROM party_role WHERE party_role_id=rid),NULL,NULL,false FROM hosp_b.pt JOIN map.b_pat USING (mrn) WHERE addr IS NOT NULL AND city IS NOT NULL AND st IS NOT NULL AND zip IS NOT NULL;
+2026-11-25 12:51:55.885 IST [21268] ERROR:  source database "healthcare_synthetic" is being accessed by other users
+2026-11-25 12:51:55.885 IST [21268] DETAIL:  There are 3 other sessions using the database.
+2026-11-25 12:51:55.885 IST [21268] STATEMENT:  CREATE DATABASE loader_qa_tmp TEMPLATE healthcare_synthetic
+2026-11-25 12:52:42.393 IST [9848] ERROR:  new row for relation "patient_master" violates check constraint "patient_master_middle_name_ck"
+2026-11-25 12:52:42.393 IST [9848] DETAIL:  Failing row contains (2, 000000402, John, , Simmons, 1949-11-28, null, M, Black or African American, Not Hispanic or Latino, en).
+2026-11-25 12:52:42.393 IST [9848] STATEMENT:  UPDATE hosp_a.patient_master SET middle_name='' WHERE patient_id=2
+2026-11-25 13:01:44.646 IST [34264] ERROR:  cannot execute DELETE in a read-only transaction
+2026-11-25 13:01:44.646 IST [34264] STATEMENT:  DELETE FROM hosp_a.payer_org
+2026-11-25 13:01:44.664 IST [29188] FATAL:  terminating connection due to administrator command
+2026-11-25 13:01:44.664 IST [5628] FATAL:  terminating connection due to administrator command
+2026-11-25 14:56:17.158 IST [18100] LOG:  using stale statistics instead of current ones because stats collector is not responding
+2026-11-25 15:51:37.318 IST [21044] ERROR:  cannot execute DELETE in a read-only transaction
+2026-11-25 15:51:37.318 IST [21044] STATEMENT:  DELETE FROM hosp_a.payer_org
+2026-11-25 15:51:37.343 IST [34420] FATAL:  terminating connection due to administrator command
+2026-11-25 15:51:37.345 IST [21820] FATAL:  terminating connection due to administrator command
+2026-11-25 18:01:44.177 IST [8524] ERROR:  syntax error at or near "old" at character 389
+2026-11-25 18:01:44.177 IST [8524] STATEMENT:  select (select count(*) from hosp_a.patient_master) p,(select count(*) from hosp_a.encounter) e,(select count(*) from hosp_a.claim_line) cl,(select count(*) from hosp_a.remit_line) r,(select count(*) from hosp_a.lab_component_result) l, (select count(*) from hosp_a.patient_master where death_date is null) alive,(select count(*) from hosp_a.patient_master where birth_date<'1950-01-01') old;
+2026-11-25 18:53:46.486 IST [20128] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-11-25 18:53:46.498 IST [36256] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-11-25 18:53:46.507 IST [36172] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-11-25 18:53:46.508 IST [14028] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-11-25 18:53:46.514 IST [11960] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-11-25 18:53:46.511 IST [26528] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-11-26 13:03:49.311 IST [14272] LOG:  starting PostgreSQL 13.3, compiled by Visual C++ build 1914, 64-bit
+2026-11-26 13:03:49.340 IST [14272] LOG:  listening on IPv4 address "127.0.0.1", port 5544
+2026-11-26 13:03:52.543 IST [16120] LOG:  database system was interrupted; last known up at 2026-11-25 15:56:37 IST
+2026-11-26 13:04:06.444 IST [16120] LOG:  database system was not properly shut down; automatic recovery in progress
+2026-11-26 13:04:06.491 IST [16120] LOG:  redo starts at 0/393B9CB0
+2026-11-26 13:04:06.492 IST [16120] LOG:  invalid record length at 0/393B9D98: wanted 24, got 0
+2026-11-26 13:04:06.493 IST [16120] LOG:  redo done at 0/393B9D60
+2026-11-26 13:04:07.512 IST [14272] LOG:  database system is ready to accept connections
+2026-11-26 13:09:35.195 IST [14272] LOG:  received SIGHUP, reloading configuration files
+2026-11-26 13:09:35.206 IST [14272] LOG:  parameter "log_statement" changed to "ddl"
+2026-11-26 13:09:35.208 IST [14272] @ LOG:  parameter "log_line_prefix" changed to "%m [%p] %u@%d "
+2026-11-26 13:09:35.919 IST [24212] postgres@postgres LOG:  statement: CREATE TEMP TABLE logging_check(x int)
+2026-11-26 13:09:35.954 IST [24212] postgres@postgres LOG:  statement: DROP TABLE logging_check

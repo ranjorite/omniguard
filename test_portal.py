@@ -1,65 +1,135 @@
-﻿"""Intentionally vulnerable local staging portal for OmniGuard purple-team testing."""
-from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
+import os
 from datetime import datetime, timezone
-from urllib.parse import urlparse, parse_qs
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
-LOG_FILE = "portal_events.jsonl"
-LEAKED_ADMIN_TOKEN = "STG_ADMIN_KEY_2026_EXPOSED"
+from omniguard_runtime import BASE_DIR, is_credential_revoked, resolve_db_path
 
-def write_log(log_type: str, action: str, path: str, cred_id: str, element: str, outcome: str, detail: str):
-    entry = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "log_type": log_type,
-        "source_system": "StagingCareerPortal",
-        "collector": "WazuhWebAgent",
-        "protocol": "HTTP",
-        "action": action,
-        "path": path,
-        "credential_id": cred_id,
-        "data_element": element,
-        "outcome": outcome,
-        "detail": detail,
-    }
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry) + "\n")
+DB_PATH = resolve_db_path()
+LOG_FILE = os.environ.get("OMNIGUARD_PORTAL_LOG", str(BASE_DIR / "logs" / "portal_events.jsonl"))
+HOST = "127.0.0.1"
+PORT = 8080
+VALID_TOKENS = {"STG_ADMIN_TOKEN_DEMO", "CRED_STG_ADMIN_01"}
 
-class PortalHandler(BaseHTTPRequestHandler):
-    def log_message(self, format, *args):
-        pass  # keep console clean
+
+def _append_event(record: dict):
+    target = Path(LOG_FILE)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record) + "\n")
+
+
+class PaymentPortalHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
 
     def do_GET(self):
         parsed = urlparse(self.path)
-        if parsed.path == "/":
-            # VULNERABILITY: Staging debug comment + hardcoded admin token left in landing page source
-            html = f"""
-            <html><body>
-            <h1>Ex-Agniveer Career Portal (STAGING TEST)</h1>
-            <!-- TODO: remove before prod! debug_export=/admin/export?token={LEAKED_ADMIN_TOKEN} -->
-            <p>Portal under maintenance.</p>
-            </body></html>
-            """
-            write_log("application", "VIEW_LANDING_PAGE", "/", "ANON_PUBLIC", "ADMIN_CREDENTIAL", "EXPOSED_IN_HTML", "Landing page served with hardcoded staging token in HTML comment")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html")
-            self.end_headers()
-            self.wfile.write(html.encode("utf-8"))
+        qs = parse_qs(parsed.query, keep_blank_values=True)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        user_agent = self.headers.get("User-Agent", "UNKNOWN")
 
-        elif parsed.path == "/admin/export":
-            token = parse_qs(parsed.query).get("token", [""])[0]
-            if token == LEAKED_ADMIN_TOKEN:
-                write_log("access", "BULK_ADMIN_EXPORT", "/admin/export", "CRED_STG_ADMIN_01", "PERSONNEL_PII_RECORDS", "SUCCESS_2500_RECORDS", "Bulk export of 2500 applicant records via exposed staging token over HTTP")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"status": "ok", "records_exported": 2500, "sample": "SYNTHETIC_APPLICANT_0001"}).encode("utf-8"))
-            else:
-                self.send_response(403)
-                self.end_headers()
-        else:
-            self.send_response(404)
+        if parsed.path == "/":
+            token = "STG_ADMIN_TOKEN_DEMO"
+            export_path = f"/admin/export?token={token}"
+            _append_event({
+                "timestamp": now_iso,
+                "log_type": "web_access",
+                "source_system": "StagingCareerPortal",
+                "collector": "WazuhWebAgent",
+                "protocol": self.request_version,
+                "action": "VIEW_LANDING_PAGE",
+                "path": parsed.path,
+                "credential_id": "CRED_STG_ADMIN_01",
+                "data_element": "ADMIN_CREDENTIAL",
+                "outcome": "EXPOSED_IN_HTML",
+                "detail": f"Landing page exposed debug_export={export_path}",
+            })
+            body = f"<html><body><!-- debug_export={export_path} --><a href='{export_path}'>Export</a></body></html>".encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if parsed.path != "/admin/export":
+            body = b"Not Found"
+            self.send_response(404)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        header_key = self.headers.get("X-API-Key")
+        query_token = qs.get("token", [None])[0]
+        token = header_key if header_key is not None else query_token
+
+        if not token or not str(token).strip() or str(token).strip() not in VALID_TOKENS:
+            payload = {
+                "status": "error",
+                "code": 403,
+                "reason": "Missing or invalid token",
+            }
+            raw = json.dumps(payload).encode("utf-8")
+            self.send_response(403)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
+
+        cred_id = "CRED_STG_ADMIN_01"
+        if is_credential_revoked(cred_id, DB_PATH) or is_credential_revoked(str(token).strip(), DB_PATH):
+            payload = {
+                "status": "error",
+                "code": 403,
+                "reason": "Credential revoked by OmniGuard SOAR-CRED-REVOKE-01",
+                "credential": cred_id,
+            }
+            raw = json.dumps(payload).encode("utf-8")
+            self.send_response(403)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
+
+        payload = {
+            "status": "ok",
+            "system": "PaymentGatewayAPI",
+            "data_classification": "CDE_CARDHOLDER_DATA",
+            "records_exported": 2500,
+        }
+        _append_event({
+            "timestamp": now_iso,
+            "log_type": "portal_export",
+            "source_system": "PaymentGatewayAPI",
+            "collector": "WazuhWebAgent",
+            "protocol": self.request_version,
+            "action": "BULK_ADMIN_EXPORT",
+            "path": parsed.path,
+            "credential_id": cred_id,
+            "data_element": "PERSONNEL_PII_RECORDS",
+            "outcome": "SUCCESS_2500_RECORDS",
+            "detail": f"Exported 2500 records using {cred_id} (UA={user_agent})",
+        })
+        raw = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def log_message(self, format, *args):
+        return
+
+
+PortalHandler = PaymentPortalHandler
 
 if __name__ == "__main__":
-    print("Starting vulnerable staging portal on http://127.0.0.1:5050 ...")
-    HTTPServer(("127.0.0.1", 5050), PortalHandler).serve_forever()
+    print(f"[PORTAL] PaymentGatewayAPI listening on http://{HOST}:{PORT}/admin/export")
+    print(f"[PORTAL] Live policy backing store: {resolve_db_path(DB_PATH)}")
+    HTTPServer((HOST, PORT), PaymentPortalHandler).serve_forever()

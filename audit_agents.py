@@ -196,7 +196,7 @@ def nist_800_agent(rows: list[dict[str, Any]]) -> list[SpecialistFinding]:
         exposed_or_aged = [
             r
             for r in nist_rows
-            if r["credential_status"] != "active"
+            if r["credential_status"] != "ACTIVE"
             or int(r["key_age_days"]) > int(r["max_age_days"])
         ]
         findings.append(

@@ -1,0 +1,6 @@
+﻿2026-11-26 12:06:52.656 IST [32320] @ LOG:  starting PostgreSQL 13.3, compiled by Visual C++ build 1914, 64-bit
+2026-11-26 12:06:52.665 IST [32320] @ LOG:  listening on IPv6 address "::", port 5432
+2026-11-26 12:06:52.670 IST [32320] @ LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-11-26 12:06:57.219 IST [16640] @ LOG:  database system was shut down at 2026-11-26 12:06:48 IST
+2026-11-26 12:06:58.185 IST [32320] @ LOG:  database system is ready to accept connections
+2026-11-26 12:08:56.083 IST [9416] postgres@postgres LOG:  statement: SELECT current_database(), current_user, now();

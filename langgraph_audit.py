@@ -328,7 +328,7 @@ def _apply_plan_filters(rows: list[dict[str, Any]], plan: QueryPlan) -> list[dic
         by_cred = [
             r
             for r in filtered
-            if str(r.get("credential_status")) != "active"
+            if str(r.get("credential_status")) != "ACTIVE"
             or int(r.get("key_age_days", 0)) > int(r.get("max_age_days", 90))
         ]
         if by_cred:
@@ -474,7 +474,7 @@ def nist_800_node(state: AuditState) -> dict[str, Any]:
         {
             c.credential_id
             for c in cites
-            if c.credential_status != "active" or c.key_age_days > c.max_age_days
+            if c.credential_status != "ACTIVE" or c.key_age_days > c.max_age_days
         }
     )
     nist_fallback = (
@@ -562,7 +562,7 @@ def _build_human_report(state: AuditState, plan: QueryPlan) -> str:
     risky_creds = sorted({
         f"{c.credential_id} ({c.credential_status}, {c.key_age_days}d old vs {c.max_age_days}d policy)"
         for c in all_citations
-        if c.credential_status != "active" or c.key_age_days > c.max_age_days
+        if c.credential_status != "ACTIVE" or c.key_age_days > c.max_age_days
     })
 
     # Detect causal kill-chain links from evidence_rows

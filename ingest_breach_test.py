@@ -4,7 +4,8 @@ import shutil
 from pathlib import Path
 import relate
 
-SOURCE_DB = Path("omniguard.rl")
+from omniguard_runtime import resolve_db_path
+SOURCE_DB = resolve_db_path()
 TEST_DB = Path("omniguard_purple_test.rl")
 
 
@@ -81,7 +82,7 @@ def ingest_events_to_test_graph(jsonl_path: Path, target_db: Path = TEST_DB) -> 
         usage_id = f"BREACH_SIM_{idx:02d}"
         cred_id = ev["credential_id"]
         is_admin = cred_id == "CRED_STG_ADMIN_01"
-        cred_status = "exposed" if is_admin else "active"
+        cred_status = "EXPOSED" if is_admin else "ACTIVE"
         key_age = 120 if is_admin else 0
 
         cur.execute(
